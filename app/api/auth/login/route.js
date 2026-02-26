@@ -4,8 +4,16 @@ import jwt from "jsonwebtoken";
 import connectToDatabase from "@/lib/mongodb";
 import User from "@/models/User";
 
-const generateToken = (id) => {
+const generateAccessToken = (id) => {
+    // 15 minutes short-lived access token
     return jwt.sign({ id }, process.env.JWT_SECRET || "fallback_secret", {
+        expiresIn: "15m",
+    });
+};
+
+const generateRefreshToken = (id) => {
+    // 30 days long-lived refresh token
+    return jwt.sign({ id }, process.env.JWT_REFRESH_SECRET || "fallback_refresh_secret", {
         expiresIn: "30d",
     });
 };
@@ -43,27 +51,46 @@ export async function POST(req) {
             );
         }
 
-        // Set cookie using Next.js Response cookies
-        const token = generateToken(user._id);
+        // 1. Generate both tokens
+        const accessToken = generateAccessToken(user._id);
+        const refreshToken = generateRefreshToken(user._id);
 
-        // We return the response and set the cookie in the headers
+        // 2. Save refresh token to user document for rotation validity check
+        user.refreshToken = refreshToken;
+        await user.save();
+
+        // 3. Create the response object
         const response = NextResponse.json(
             {
                 _id: user.id,
                 name: user.name,
                 email: user.email,
                 message: "Logged in successfully",
-                token: token, // Optionally send to client too, but cookie is better
+                // Notice: Not storing access token in frontend localStorage!
+                // It's sent via HTTP-Only cookie, but also returned here if frontend needs to decode it (e.g., getting user ID without another request).
+                accessToken: accessToken,
             },
             { status: 200 }
         );
 
-        // Set the cookie
+        const isProduction = process.env.NODE_ENV === "production";
+
+        // 4. Set both tokens in HttpOnly cookies securely
         response.cookies.set({
-            name: "token",
-            value: token,
+            name: "accessToken",
+            value: accessToken,
+            httpOnly: true, // Prevents XSS script from accessing it
+            secure: isProduction, // HTTPS only in production
+            sameSite: "strict", // Protects against CSRF
+            maxAge: 15 * 60, // 15 minutes
+            path: "/",
+        });
+
+        response.cookies.set({
+            name: "refreshToken",
+            value: refreshToken,
             httpOnly: true,
-            secure: process.env.NODE_ENV !== "development",
+            secure: isProduction,
             sameSite: "strict",
             maxAge: 30 * 24 * 60 * 60, // 30 days
             path: "/",
